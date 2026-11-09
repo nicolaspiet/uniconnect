@@ -1,0 +1,33 @@
+name: Falha no aplicativo
+description: Relate um problema sem compartilhar senha ou dados pessoais.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Nunca publique senha, matrícula, cookies, tokens ou HTML completo do portal. Use somente o diagnóstico sem credenciais oferecido pelo app.
+  - type: input
+    id: version
+    attributes:
+      label: Versão do UniConnect
+      placeholder: Veja em Ajustes
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Aparelho e versão do Android
+      placeholder: Samsung Galaxy M13, Android 14
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Como reproduzir
+      description: Descreva passos, comportamento esperado e o que ocorreu.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostic
+    attributes:
+      label: Diagnóstico sem credenciais
+      description: Opcional. Revise o texto antes de enviar.
