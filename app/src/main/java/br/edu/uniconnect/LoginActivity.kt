@@ -39,6 +39,8 @@ class LoginActivity : ComponentActivity() {
     private var submitStarted = false
     private var verificationJob: Job? = null
     private var credentials: Credentials? = null
+    private var session: PortalLoginSession? = null
+    private var terminal by mutableStateOf(false)
     private var status by mutableStateOf("Suas credenciais serão enviadas apenas ao portal HTTPS da UFDPar.")
     private var showingProgress by mutableStateOf(false)
 
@@ -75,20 +77,20 @@ class LoginActivity : ComponentActivity() {
                                 AndroidView(factory = { createBrowser() }, modifier = Modifier.size(1.dp).alpha(0f))
                                 Card(Modifier.fillMaxWidth().align(Alignment.Center)) {
                                     Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                                        CircularProgressIndicator()
-                                        Text("Autenticando com o portal…", style = MaterialTheme.typography.titleLarge)
+                                        if (!terminal) CircularProgressIndicator()
+                                        Text(if (terminal) "Autenticação encerrada" else "Autenticando com o portal…", style = MaterialTheme.typography.titleLarge)
                                         Text(status)
                                         Text("O navegador não é exibido. Aguarde até 30 segundos.", style = MaterialTheme.typography.bodySmall)
                                     }
                                 }
                             }
                             OutlinedButton(onClick = { cancelLogin() }, modifier = Modifier.fillMaxWidth()) { Text("Cancelar") }
-                            if (status.startsWith("O portal não confirmou") || status.startsWith("Certificado") || status.startsWith("O portal não aceitou")) {
+                            if (terminal) {
                                 Button(onClick = { finish() }, modifier = Modifier.fillMaxWidth()) { Text("Voltar e tentar novamente") }
                             }
                         } else {
                             Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Text("Use o usuário e a senha do SIGAA. Esta versão preenche e envia o portal com o app aberto; ainda não funciona em segundo plano.")
+                                Text("Use o usuário e a senha do SIGAA. O modo automático pode ser ativado nas configurações após salvar suas credenciais.")
                                 OutlinedTextField(value = user, onValueChange = { user = it }, label = { Text("Usuário SIGAA") }, singleLine = true, enabled = !busy)
                                 OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Senha") }, singleLine = true,
                                     visualTransformation = PasswordVisualTransformation(), enabled = !busy)
@@ -109,6 +111,7 @@ class LoginActivity : ComponentActivity() {
                                                 credentials = entered
                                                 password = ""
                                                 submitStarted = false
+                                                terminal = false
                                                 showingProgress = true
                                                 status = "Abrindo o portal pelo Wi-Fi…"
                                             } catch (_: Exception) {
@@ -184,7 +187,7 @@ class LoginActivity : ComponentActivity() {
                 val uri = request.url
                 if (allowed(uri.toString())) return false
                 if (submitStarted && (uri.scheme == "https" || uri.scheme == "http")) return false
-                status = "O portal tentou abrir um endereço não autorizado."
+                endAttempt("O portal tentou abrir um endereço não autorizado.")
                 return true
             }
 
@@ -196,70 +199,78 @@ class LoginActivity : ComponentActivity() {
 
             override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
                 handler.cancel()
-                credentials = null
-                status = "Certificado HTTPS não validado. Conexão interrompida."
-                submitStarted = true
+                endAttempt("Certificado HTTPS não validado. Conexão interrompida.")
             }
 
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (request.isForMainFrame) {
-                    status = "Falha ao carregar o portal (código ${error.errorCode}). Encerre e tente novamente."
+                    if (!submitStarted) endAttempt("Falha ao carregar o portal (código ${error.errorCode}). Tente novamente.")
                     credentials = null
                 }
             }
 
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
                 if (request.isForMainFrame) {
-                    status = "O portal respondeu HTTP ${response.statusCode}. Nenhum novo envio automático será feito."
+                    endAttempt("O portal respondeu HTTP ${response.statusCode}. Nenhum novo envio automático será feito.")
                     credentials = null
                 }
             }
 
             override fun onPageFinished(view: WebView, url: String) {
-                if (submitStarted || !allowed(url)) return
-                val saved = credentials ?: return
-                submitStarted = true
-                view.evaluateJavascript(LoginScript.fillAndSubmit(saved.user, saved.password)) { result ->
-                    credentials = null
-                    status = when (result) {
-                        "\"submitted\"" -> "Login enviado. Confirmando a conexão…"
-                        "\"needs-interaction\"" -> "O portal exige uma interação adicional."
-                        "\"unsupported\"" -> "O formulário do portal mudou e precisa de atualização."
-                        else -> "O portal não aceitou o envio automático."
-                    }
-                    if (result == "\"submitted\"") verifyConnection()
-                }
+                if (!terminal && webView === view && allowed(url)) session?.pageFinished(view)
             }
         }
+        val entered = credentials
+        credentials = null
+        if (entered != null) session = PortalLoginSession(entered,
+            onSubmitted = { submitStarted = true; status = "Login enviado. Confirmando a conexão…" },
+            onFailure = { message -> post { endAttempt(message) } })
+        verifyConnection()
         loadUrl(PortalReport.PORTAL)
+    }
+
+    private fun endAttempt(message: String) {
+        if (terminal) return
+        terminal = true
+        status = message
+        credentials = null
+        session?.close()
+        verificationJob?.cancel()
+        webView?.stopLoading()
+        releaseNetwork()
     }
 
     private fun verifyConnection() {
         verificationJob?.cancel()
         verificationJob = lifecycleScope.launch {
-            repeat(15) {
-                delay(2_000)
-                val caps = network?.let(manager::getNetworkCapabilities)
-                if (caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                    status = "O Wi-Fi caiu durante a autenticação."
+            val deadline = android.os.SystemClock.elapsedRealtime() + 30_000
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                delay(1_000)
+                val selected = network
+                val caps = selected?.let(manager::getNetworkCapabilities)
+                if (selected == null || caps == null || !caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    endAttempt("O Wi-Fi caiu durante a autenticação.")
                     return@launch
                 }
                 if (isVpnActive()) {
-                    status = "Uma VPN foi ativada durante a autenticação. Desative-a e tente novamente."
+                    endAttempt("Uma VPN foi ativada durante a autenticação. Desative-a e tente novamente.")
                     return@launch
                 }
-                if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true) {
-                    status = "Você já está conectado à internet."
-                    delay(700)
+                val connected = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ||
+                    (submitStarted && withContext(Dispatchers.IO) { WifiInternetProbe.reachable(selected) })
+                if (terminal) return@launch
+                if (connected && manager.getNetworkCapabilities(selected) != null && !isVpnActive()) {
+                    endAttempt("Conexão com a internet confirmada.")
                     finish()
                     return@launch
                 }
             }
-            status = "O portal não confirmou a conexão em 30 segundos. Verifique a senha, a VPN e o Wi-Fi."
+            endAttempt("Sem internet após a tentativa. O portal não confirmou o login; confira suas credenciais no portal oficial antes de tentar novamente.")
         }
     }
 
     private fun cancelLogin() {
+        session?.close()
         verificationJob?.cancel()
         credentials = null
         finish()
@@ -273,6 +284,7 @@ class LoginActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        session?.close()
         verificationJob?.cancel()
         credentials = null
         webView?.apply { stopLoading(); removeAllViews(); destroy() }

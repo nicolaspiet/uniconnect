@@ -21,6 +21,7 @@ class AutoConnectService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var manager: ConnectivityManager
     private var browser: WebView? = null
+    private var session: PortalLoginSession? = null
     private var current: Network? = null
     private var job: Job? = null
     private var debounceJob: Job? = null
@@ -72,15 +73,18 @@ class AutoConnectService : Service() {
                     AutomationPreferences.report(this@AutoConnectService, lastStatus, failed || current in attempted)
                     if (!AutomationPreferences.enabled(this@AutoConnectService)) { stopSelf(); return@collect }
                     val active = current
-                    if (active != null && refreshed.none { it.network == active }) {
+                    if (active != null && vpnActive()) {
+                        finishAttempt("Uma VPN foi ativada durante a autenticação. Desative-a e reative o modo automático.", true)
+                    }
+                    if (current != null && active != null && refreshed.none { it.network == active }) {
                         finishAttempt("Wi-Fi desconectou. Aguardando nova conexão.", false)
                     }
-                    if (active != null && refreshed.any { it.network == active && it.validated }) {
+                    if (current != null && active != null && refreshed.any { it.network == active && it.validated }) {
                         attempted.remove(active)
                         finishAttempt("Você já está conectado. Monitorando Wi-Fi.", false)
                     }
                     val wifi = refreshed.firstOrNull { CampusNetwork.accepts(it.ssid) }
-                    if (failed) update("Atenção necessária. Use o login manual ou pause e reative.")
+                    if (failed) update(lastStatus)
                     else if (wifi != null && wifi.validated && current == null) update("Você já está conectado. Monitorando Wi-Fi.")
                     else if (wifi == null && current == null) update("Aguardando Wi-Fi da UFDPar.")
                     if (wifi != null && !wifi.validated && !failed && current == null && wifi.network !in attempted) {
@@ -125,8 +129,9 @@ class AutoConnectService : Service() {
         lastAttempt = SystemClock.elapsedRealtime()
         if (!manager.bindProcessToNetwork(network)) { finishAttempt("Não foi possível selecionar o Wi-Fi.", true); return }
         update("Autenticando no portal da UFDPar…")
-        var submitted = false
-        var credentials: Credentials? = saved
+        session = PortalLoginSession(saved,
+            onSubmitted = { update("Login enviado. Aguardando validação da internet…") },
+            onFailure = { message -> handler.post { if (current == network) finishAttempt(message, true) } })
         browser = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -140,21 +145,18 @@ class AutoConnectService : Service() {
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
                     if (allowed(request.url.toString())) null else WebResourceResponse("text/plain", "UTF-8", 403, "Blocked", emptyMap(), ByteArrayInputStream(ByteArray(0)))
                 override fun onReceivedSslError(view: WebView, ssl: SslErrorHandler, error: SslError) {
-                    ssl.cancel(); credentials = null
-                    handler.post { finishAttempt("Certificado inválido. Automação pausada; use o login manual.", true) }
+                    ssl.cancel(); session?.close()
+                    handler.post { if (browser === view) finishAttempt("Certificado inválido. Automação pausada; use o login manual.", true) }
                 }
                 override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-                    if (request.isForMainFrame) handler.post { finishAttempt("Erro de conexão (${error.errorCode}). Automação pausada.", true) }
+                    if (request.isForMainFrame) handler.post { if (browser === view) finishAttempt("Erro de conexão (${error.errorCode}). Automação pausada.", true) }
                 }
                 override fun onPageFinished(view: WebView, url: String) {
-                    if (submitted || !allowed(url) || browser !== view) return
-                    val entered = credentials ?: return
-                    submitted = true
-                    credentials = null
-                    view.evaluateJavascript(LoginScript.fillAndSubmit(entered.user, entered.password)) { result ->
-                        if (result != "\"submitted\"") handler.post {
-                            finishAttempt("Portal exige interação. Use o login manual; automação pausada.", true)
-                        } else update("Login enviado. Aguardando validação da internet…")
+                    if (allowed(url) && browser === view) session?.pageFinished(view)
+                }
+                override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
+                    if (request.isForMainFrame) handler.post {
+                        if (browser === view) finishAttempt("O portal respondeu HTTP ${response.statusCode}. Automação pausada.", true)
                     }
                 }
             }
@@ -168,12 +170,8 @@ class AutoConnectService : Service() {
                 delay(4_000)
                 if (current != network) return@launch
                 val validated = manager.getNetworkCapabilities(network)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
-                val reachable = if (submitted && !validated) withContext(Dispatchers.IO) {
-                    runCatching {
-                        val conn = network.openConnection(java.net.URL("https://connectivitycheck.gstatic.com/generate_204")) as javax.net.ssl.HttpsURLConnection
-                        try { conn.instanceFollowRedirects = false; conn.connectTimeout = 3_000; conn.readTimeout = 3_000; conn.responseCode == 204 }
-                        finally { conn.disconnect() }
-                    }.getOrDefault(false)
+                val reachable = if (session?.submitted == true && !validated) withContext(Dispatchers.IO) {
+                    WifiInternetProbe.reachable(network)
                 } else false
                 if (current == network && (validated || reachable)) {
                     attempted.remove(network)
@@ -188,6 +186,7 @@ class AutoConnectService : Service() {
         debounceJob?.cancel(); debounceJob = null
         probeJob?.cancel(); probeJob = null
         handler.removeCallbacks(timeout)
+        session?.close(); session = null
         browser?.apply { stopLoading(); destroy() }
         browser = null
         manager.bindProcessToNetwork(null)
@@ -212,6 +211,7 @@ class AutoConnectService : Service() {
     }
     override fun onDestroy() {
         scope.cancel(); handler.removeCallbacksAndMessages(null)
+        session?.close(); session = null
         browser?.apply { stopLoading(); destroy() }; browser = null
         manager.bindProcessToNetwork(null)
         super.onDestroy()

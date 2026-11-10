@@ -43,6 +43,8 @@ jobs:
               exit 1
             fi
           done
+      - name: Verify portal scripts
+        run: node tools/test_login_script.cjs
       - name: Install Android SDK
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - name: Verify and build

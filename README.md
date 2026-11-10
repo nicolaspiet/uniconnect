@@ -8,7 +8,7 @@ Aplicativo Android independente para autenticar no Wi-Fi da Universidade Federal
 
 Android 12 ou superior. Baixe o APK na página de releases e abra o arquivo completo no celular. Use o mesmo aplicativo de origem da instalação para autorizar instalações quando o Android solicitar.
 
-A versão **0.6.0 (código 8)** mantém a assinatura dos APKs distribuídos anteriormente. A instalação por cima preserva os dados do aplicativo. Não desinstale para atualizar. O app consulta releases públicas ao abrir e em **Ajustes > Verificar atualizações**, oferece novidades e mostra o progresso do download. Confere tamanho, SHA-256, pacote, versão e assinatura antes de abrir o instalador do Android. Instalação sempre depende da confirmação do usuário.
+A versão **0.6.1 (código 9)** mantém a assinatura dos APKs distribuídos anteriormente. A instalação por cima preserva os dados do aplicativo. Não desinstale para atualizar. O app consulta releases públicas ao abrir e em **Ajustes > Verificar atualizações**, oferece novidades e mostra o progresso do download. Confere tamanho, SHA-256, pacote, versão e assinatura antes de abrir o instalador do Android. Instalação sempre depende da confirmação do usuário.
 
 Se a instalação disser “pacote inválido”, descarte o arquivo baixado e baixe novamente o APK pela release oficial. Não use a página HTML salva como APK nem `app-release-unsigned.apk`. Se continuar, anote a versão instalada, a versão do Android e o erro; a mensagem do instalador sozinha não identifica a causa.
 
@@ -32,6 +32,7 @@ Widget compacto e bloco na central de controles podem ser adicionados em Ajustes
 JDK 17, Android SDK 35 e Build Tools 35.0.0:
 
 ```sh
+node tools/test_login_script.cjs
 ./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease
 ```
 

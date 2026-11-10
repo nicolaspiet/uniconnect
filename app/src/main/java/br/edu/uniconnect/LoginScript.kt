@@ -8,7 +8,10 @@ object LoginScript {
 
     fun fillAndSubmit(user: String, password: String): String = """
         (function() {
+          let phase = 'prepare';
+          try {
             if (location.origin !== 'https://login.ufdpar.edu.br:6082') return 'wrong-origin';
+            if (document.readyState !== 'complete') return 'not-ready';
             const forms = Array.from(document.forms).filter(f =>
                 f.querySelector('input[name="user"]') && f.querySelector('input[name="passwd"][type="password"]'));
             if (forms.length !== 1) return 'unsupported';
@@ -30,13 +33,32 @@ object LoginScript {
                 input.dispatchEvent(new Event('change', {bubbles:true}));
                 input.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true, key:'Tab'}));
             }
-            if (button.disabled) return 'needs-interaction';
-            // Palo Alto pages register a submit handler that creates preauthid/escapeUser.
-            // Run that handler before requestSubmit; a plain button.click() can leave the page
-            // on the form without sending those hidden values on some WebView versions.
-            if (typeof submitClicked === 'function') submitClicked();
-            if (typeof f.requestSubmit === 'function') f.requestSubmit(button); else button.click();
+            if (button.disabled) return 'not-ready';
+            if (typeof f.checkValidity === 'function' && !f.checkValidity()) return 'invalid-fields';
+            // Click once: let the portal's click/submit handlers prepare hidden fields.
+            // Calling submitClicked separately duplicates side effects and requestSubmit skips click handlers.
+            phase = 'click';
+            button.click();
             return 'submitted';
+          } catch (_) {
+            // Report only a fixed code: exception messages may expose credentials or tokens.
+            return phase === 'click' ? 'submit-error' : 'script-error';
+          }
+        })();
+    """.trimIndent()
+
+    fun inspectResponse(): String = """
+        (function() {
+          try {
+            if (location.origin !== 'https://login.ufdpar.edu.br:6082') return 'other-page';
+            const visible = el => el && el.getClientRects().length > 0 &&
+              getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+            const errors = Array.from(document.querySelectorAll('#dError, [role="alert"]'));
+            if (errors.some(el => visible(el) && el.textContent.trim().length > 0)) return 'portal-error';
+            if (typeof respStatus === 'string' && respStatus === 'Challenge') return 'challenge';
+            if (document.querySelector('input[name="passwd"][type="password"]')) return 'login-form';
+            return 'other-page';
+          } catch (_) { return 'inspection-error'; }
         })();
     """.trimIndent()
 }
